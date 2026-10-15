@@ -36,6 +36,50 @@ Options for training:
 - `random_step=True` replays a random number of moves on each access, so the model sees a different partly solved board each epoch. Leave it off for evaluation to get the original puzzle.
 - `augment=True` applies a random transform that keeps the puzzle valid: digit relabelling, row and column swaps within a band, band swaps, and transpose.
 
+### Generating records
+
+`sudoku.augment` makes new records from existing ones by applying random operations that keep a puzzle valid. Each operation changes the puzzle, solution and moves together, and keeps the move order, so a generated record is still a logically ordered solve.
+
+To generate records, run this from the repository root, with the dependencies installed (see [Tests](#tests)):
+
+```
+python -m sudoku.augment --count 100000 --seed 0
+```
+
+This reads `data/manual.parquet` and writes `data/generated.parquet`, overwriting it if it exists. Generating 100,000 records takes under a minute.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--count` | required | Number of records to generate |
+| `--input` | `data/manual.parquet` | Records to use as bases; the tool cycles through them in turn |
+| `--output` | `data/generated.parquet` | File to write |
+| `--min-ops`, `--max-ops` | 100, 150 | Each record gets a random number of operations in this range |
+| `--seed` | random | Fixes the random choices, so the same seed and input give the same file |
+| `--source` | `generated` | Value written to the `source` column |
+
+Every generated puzzle is distinct from the inputs and from each other. Generated files are ignored by git, so use `--seed` to be able to recreate the same file.
+
+**Operations.** Each record gets operations picked at random from this list, with repeats:
+
+- relabel the digits 1–9 with a random permutation
+- swap two rows within a band (rows 0–2, 3–5 or 6–8), or two columns within a stack
+- swap two bands, or two stacks
+- rotate 90° clockwise, transpose, or mirror left to right or top to bottom
+
+Each operation is a small change, so it takes about 100 of them before a record stops resembling its base puzzle; fewer leave records close to the originals.
+
+**Keeping test data separate.** Every generated record is a disguised copy of one base puzzle. To measure performance on puzzles the model has never seen, split the base puzzles first, then generate from each split separately:
+
+```
+python -m sudoku.split --test-count 2 --seed 0
+python -m sudoku.augment --input data/manual_train.parquet --output data/generated_train.parquet --count 80000 --seed 0
+python -m sudoku.augment --input data/manual_test.parquet --output data/generated_test.parquet --count 20000 --seed 1
+```
+
+`sudoku.split` picks `--test-count` puzzles at random from `data/manual.parquet` and writes them to `data/manual_test.parquet`, with the rest in `data/manual_train.parquet`. `data/manual.parquet` stays the full set: after adding hand-solved puzzles to it, run the split again. A new split can move puzzles between train and test, so regenerate both generated files afterwards.
+
+**Adding an operation.** Write a function that takes a NumPy random generator and returns a cell permutation and a digit relabelling, then add it to `OPERATIONS` in `sudoku/augment.py`. The tests check every operation in that list automatically.
+
 ### Tests
 
 ```
