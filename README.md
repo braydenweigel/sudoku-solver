@@ -80,6 +80,24 @@ python -m sudoku.augment --input data/manual_test.parquet --output data/generate
 
 **Adding an operation.** Write a function that takes a NumPy random generator and returns a cell permutation and a digit relabelling, then add it to `OPERATIONS` in `sudoku/augment.py`. The tests check every operation in that list automatically.
 
+### Move lists for puzzles with only a solution
+
+Public sudoku datasets give a puzzle and its solution but no moves. `sudoku.moves` produces a logically ordered move list for each one: at every step it places a naked or hidden single, and when there is none it eliminates candidates with locked candidates, naked pairs and triples, or hidden pairs until a single appears. It never guesses, so every move is deducible from the board before it.
+
+```
+python -m sudoku.moves --input puzzles.csv --output data/public.parquet --source public
+```
+
+The input is a CSV with a header row and the puzzle and solution as its first two columns (81 characters each, `0` or `.` for blanks), as in the common Kaggle sudoku datasets. Puzzles that need harder techniques, or that have more than one solution, are skipped and counted. It takes about 10 ms per puzzle, so 100,000 puzzles take around 20 minutes; `--limit N` uses only the first N rows. The output is an ordinary record file, ready for `sudoku.split`.
+
+**Harder test puzzles.** `--hard-only` keeps only the puzzles those techniques can't finish, and that have exactly one solution, so it makes a test set harder than anything in the training data:
+
+```
+python -m sudoku.moves --input puzzles.csv --output data/hard_test.parquet --source hard --hard-only --count 2000
+```
+
+When the techniques run out, it places the solution's digit in the blank cell with the fewest candidates (a guided guess) and carries on, and it prints how many guesses the puzzles needed. Moves after a guess can't be deduced from the board alone, so use these files for evaluation only, not for training. None of these puzzles can be in a training file made by `sudoku.moves` without `--hard-only`, since that skips them.
+
 ## Training
 
 `sudoku.train` trains `sudoku.model.SudokuTransformer`, which reads a board and predicts a digit for all 81 cells at once. After generating `data/generated_train.parquet` and `data/generated_test.parquet` (see above):
@@ -107,7 +125,7 @@ Useful options:
 - **one cell at a time**: fill only the blank cell the model is most confident about, then run it again on the updated board, until the grid is full.
 
 ```
-python -m sudoku.evaluate --data data/generated_test.parquet data/generated_train.parquet
+python -m sudoku.evaluate --data data/generated_test.parquet data/generated_train.parquet data/hard_test.parquet
 ```
 
 It uses the first 2,000 puzzles of each file by default (`--limit`).

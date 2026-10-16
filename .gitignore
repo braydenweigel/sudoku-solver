@@ -4,3 +4,4 @@ __pycache__/
 
 generated*.parquet
 checkpoints/
+puzzles.csv
