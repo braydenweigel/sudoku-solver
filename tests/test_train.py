@@ -50,10 +50,20 @@ def test_main_trains_and_saves_checkpoint(tmp_path):
     out = tmp_path / "model.pt"
     main([
         "--train", str(train), "--test", str(test), "--out", str(out), "--epochs", "2",
-        "--batch-size", "4", "--d-model", "32", "--layers", "1", "--heads", "2", "--device", "cpu",
+        "--batch-size", "4", "--d-model", "32", "--layers", "1", "--heads", "2", "--loops", "2", "--device", "cpu",
     ])
     checkpoint = torch.load(out)
-    assert checkpoint["model_args"]["d_model"] == 32
+    assert checkpoint["model_args"]["d_model"] == 32 and checkpoint["model_args"]["loops"] == 2
     assert 0.0 <= checkpoint["metrics"]["cell_acc"] <= 1.0
     model = load_model(out)
+    assert model.loops == 2
     assert model(torch.zeros(1, 81, dtype=torch.long)).shape == (1, 81, 9)
+
+
+def test_load_model_accepts_checkpoints_without_loops(tmp_path):
+    from sudoku.model import SudokuTransformer
+
+    args = dict(d_model=32, n_layers=1, n_heads=2, dropout=0.0)  # saved before loops existed
+    path = tmp_path / "old.pt"
+    torch.save({"model_args": args, "state_dict": SudokuTransformer(**args).state_dict()}, path)
+    assert load_model(path).loops == 1

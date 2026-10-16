@@ -36,3 +36,30 @@ def test_gradients_reach_all_parameters():
     model = small_model()
     model(torch.randint(0, 10, (2, 81))).sum().backward()
     assert all(p.grad is not None for p in model.parameters())
+
+
+def test_one_loop_matches_plain_encoder():
+    model = small_model().eval()
+    board = torch.randint(0, 10, (3, 81))
+    x = model.digit(board) + model.row(model.rows) + model.col(model.cols) + model.box(model.boxes)
+    with torch.no_grad():
+        assert torch.allclose(model(board), model.head(model.encoder(x)), atol=1e-6)
+
+
+def test_loops_reuse_the_same_layers():
+    one = SudokuTransformer(d_model=32, n_layers=2, n_heads=2, dropout=0.0, loops=1)
+    three = SudokuTransformer(d_model=32, n_layers=2, n_heads=2, dropout=0.0, loops=3)
+    assert sum(p.numel() for p in one.parameters()) == sum(p.numel() for p in three.parameters())
+    three.load_state_dict(one.state_dict())  # same weights fit either way
+    board = torch.randint(0, 10, (2, 81))
+    with torch.no_grad():
+        out = three.eval()(board)
+        assert out.shape == (2, 81, 9)
+        assert not torch.allclose(out, one.eval()(board))  # but more rounds compute something different
+
+
+def test_loops_must_be_positive():
+    import pytest
+
+    with pytest.raises(ValueError):
+        SudokuTransformer(loops=0)

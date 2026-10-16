@@ -129,6 +129,7 @@ Useful options:
 
 - `--limit N` trains on the first N records only, for quick runs. The test file is still used in full.
 - `--d-model`, `--layers`, `--heads`, `--dropout` set the model size (defaults 128, 6, 4, 0.1).
+- `--loops N` runs the layers N times in a row (default 1), giving `layers × N` rounds of reasoning with the parameters of `layers`. Each extra round adds the original board back in. Training and solving take about N times as long. Steps that need a chain of reasoning, like the trial steps of hard puzzles, may need more rounds than one pass gives.
 - `--batch-size`, `--lr`, `--weight-decay` set the optimiser (defaults 256, 3e-4, 0.01). The learning rate warms up, then decays to zero by the last epoch.
 - `--augment` also applies random symmetries to each training example as it is loaded.
 - `--hard-fraction P` trains on the decisive boards of hard puzzles more often (see `hard_fraction` above). It needs a training file with move kinds, made from `sudoku.moves` output. Try 0.5.

@@ -16,10 +16,18 @@ class SudokuTransformer(nn.Module):
     Each cell's vector is the sum of embeddings for its digit, row, column and
     box, so the model knows from the start which cells constrain each other.
     A transformer encoder then lets every cell attend to every other cell.
+
+    With `loops` > 1 the same layers run that many times in a row, giving
+    `n_layers * loops` rounds of reasoning for the parameters of `n_layers`.
+    Each round after the first adds the input embeddings back in, so the clues
+    stay in view however deep the chain of reasoning gets.
     """
 
-    def __init__(self, d_model=128, n_layers=6, n_heads=4, dropout=0.1):
+    def __init__(self, d_model=128, n_layers=6, n_heads=4, dropout=0.1, loops=1):
         super().__init__()
+        if loops < 1:
+            raise ValueError("loops must be at least 1")
+        self.loops = loops
         self.digit = nn.Embedding(10, d_model)
         self.row = nn.Embedding(9, d_model)
         self.col = nn.Embedding(9, d_model)
@@ -40,4 +48,10 @@ class SudokuTransformer(nn.Module):
 
     def forward(self, board):
         x = self.digit(board) + self.row(self.rows) + self.col(self.cols) + self.box(self.boxes)
-        return self.head(self.encoder(x))
+        h = x
+        for loop in range(self.loops):
+            if loop:
+                h = h + x
+            for layer in self.encoder.layers:
+                h = layer(h)
+        return self.head(self.encoder.norm(h))

@@ -83,6 +83,7 @@ def main(argv=None):
     parser.add_argument("--layers", type=int, default=6)
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--loops", type=int, default=1, help="run the layers this many times in a row")
     parser.add_argument("--augment", action="store_true", help="also apply random symmetries while training")
     parser.add_argument(
         "--hard-fraction",
@@ -108,7 +109,9 @@ def main(argv=None):
     train_loader = DataLoader(train_set, shuffle=True, drop_last=len(train_set) > args.batch_size, **loader_args)
     test_loader = DataLoader(test_set, **loader_args)
 
-    model_args = dict(d_model=args.d_model, n_layers=args.layers, n_heads=args.heads, dropout=args.dropout)
+    model_args = dict(
+        d_model=args.d_model, n_layers=args.layers, n_heads=args.heads, dropout=args.dropout, loops=args.loops
+    )
     model = SudokuTransformer(**model_args).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     total_steps = args.epochs * len(train_loader)
