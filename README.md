@@ -99,6 +99,19 @@ Useful options:
 - `--batch-size`, `--lr`, `--weight-decay` set the optimiser (defaults 256, 3e-4, 0.01). The learning rate warms up, then decays to zero by the last epoch.
 - `--augment` also applies random symmetries to each training example as it is loaded.
 
+### Comparing solving methods
+
+`sudoku.evaluate` runs a trained model on the original puzzles in one or more files and reports cell and puzzle accuracy for each way of filling the board (`sudoku/solve.py`):
+
+- **all at once**: one run of the model fills every blank cell.
+- **one cell at a time**: fill only the blank cell the model is most confident about, then run it again on the updated board, until the grid is full.
+
+```
+python -m sudoku.evaluate --data data/generated_test.parquet data/generated_train.parquet
+```
+
+It uses the first 2,000 puzzles of each file by default (`--limit`).
+
 ## Tests
 
 ```
