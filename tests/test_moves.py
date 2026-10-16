@@ -2,8 +2,9 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
-from sudoku.data import apply_moves, encode, read_records, validate_record
-from sudoku.moves import UNITS, _Board, count_solutions, guided_moves, logical_moves, main
+from sudoku.data import MOVE_BASIC, MOVE_SEARCH, MOVE_TRIAL, apply_moves, encode, read_kinds, read_records, validate_record
+import sudoku.moves as moves_module
+from sudoku.moves import UNITS, _Board, count_solutions, logical_moves, main, make_moves
 
 from test_data import PUZZLE, SOLUTION
 
@@ -15,7 +16,11 @@ TRIPLE_SOLUTION = "5964238712175683944831795263296817456742351898517946327689524
 HARD_PUZZLE = "800000000003600000070090200050007000000045700000100030001000068008500010090000400"
 HARD_SOLUTION = "812753649943682175675491283154237896369845721287169534521974368438526917796318452"
 
-# The same puzzle as TRIPLE_PUZZLE with a given removed, leaving two solutions.
+# Beyond basic reasoning, but one trial elimination is enough.
+TRIAL_PUZZLE = "380100000000050600000900003040000000005018000000090561060024780800000006004080020"
+TRIAL_SOLUTION = "386172954419853672527946813741365298695218437238497561163524789852739146974681325"
+
+# A different puzzle from TRIPLE_PUZZLE with a given removed, leaving two solutions.
 AMBIGUOUS_PUZZLE = "006008000000200000809000357070000500008090600001000040534000901000001000000000700"
 AMBIGUOUS_SOLUTION = "716358294345279186829416357273864519458193672961527843534782961687931425192645738"
 
@@ -73,34 +78,31 @@ def test_units_cover_grid():
     assert all(sorted(sum(UNITS[i : i + 9], [])) == list(range(81)) for i in (0, 9, 18))
 
 
-def test_main_writes_records_and_skips_hard(tmp_path):
+def write_csv(path, rows):
+    lines = ["puzzle,solution"] + [f"{p},{s}" for p, s in rows]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_main_writes_every_unique_puzzle_by_default(tmp_path):
     csv = tmp_path / "puzzles.csv"
-    csv.write_text(
-        "quizzes,solutions\n"
-        f"{PUZZLE},{SOLUTION}\n"
-        f"{HARD_PUZZLE},{HARD_SOLUTION}\n"
-        f"{TRIPLE_PUZZLE.replace('0', '.')},{TRIPLE_SOLUTION}\n"
-    )
+    write_csv(csv, [(PUZZLE, SOLUTION), (TRIAL_PUZZLE, TRIAL_SOLUTION), (AMBIGUOUS_PUZZLE, AMBIGUOUS_SOLUTION),
+                    (TRIPLE_PUZZLE.replace("0", "."), TRIPLE_SOLUTION)])
     out = tmp_path / "out.parquet"
     main(["--input", str(csv), "--output", str(out), "--source", "public"])
     records = read_records(out)
-    assert len(records) == 2
-    assert pq.read_table(out).column("source").to_pylist() == ["public", "public"]
-    assert_logical(records[1][0], records[1][2])
+    assert [r[0].tolist() for r in records] == [encode(x).tolist() for x in (PUZZLE, TRIAL_PUZZLE, TRIPLE_PUZZLE)]
+    assert pq.read_table(out).column("source").to_pylist() == ["public"] * 3
+    for record in records:
+        validate_record(*record)
+    assert_logical(records[2][0], records[2][2])
 
 
-def test_guided_moves_match_logical_when_no_guess_needed():
-    p, s = encode(PUZZLE), encode(SOLUTION)
-    moves, guesses = guided_moves(p, s)
-    assert guesses == 0
-    assert np.array_equal(moves, logical_moves(p, s))
-
-
-def test_guided_moves_finish_hard_puzzle():
-    p, s = encode(HARD_PUZZLE), encode(HARD_SOLUTION)
-    moves, guesses = guided_moves(p, s, np.random.default_rng(0))
-    assert guesses > 0
-    validate_record(p, s, moves)
+def test_main_basic_level_skips_hard(tmp_path):
+    csv = tmp_path / "puzzles.csv"
+    write_csv(csv, [(PUZZLE, SOLUTION), (TRIAL_PUZZLE, TRIAL_SOLUTION)])
+    out = tmp_path / "out.parquet"
+    main(["--input", str(csv), "--output", str(out), "--source", "public", "--level", "basic"])
+    assert [r[0].tolist() for r in read_records(out)] == [encode(PUZZLE).tolist()]
 
 
 @pytest.mark.parametrize(
@@ -111,17 +113,86 @@ def test_count_solutions(puzzle, expected):
     assert count_solutions(encode(puzzle)) == expected
 
 
+@pytest.mark.parametrize(
+    "puzzle, solution, solved_at",
+    [(PUZZLE, SOLUTION, "basic"), (TRIAL_PUZZLE, TRIAL_SOLUTION, "trial"), (HARD_PUZZLE, HARD_SOLUTION, "search")],
+)
+def test_levels(puzzle, solution, solved_at):
+    p, s = encode(puzzle), encode(solution)
+    for level in ("basic", "trial", "search"):
+        moves, kinds = make_moves(p, s, np.random.default_rng(0), level)
+        if ["basic", "trial", "search"].index(level) < ["basic", "trial", "search"].index(solved_at):
+            assert moves is None
+        else:
+            validate_record(p, s, moves)  # every move is a correct placement, each cell once
+            assert kinds.shape == (len(moves),)
+            assert (kinds == MOVE_TRIAL).any() == (solved_at != "basic")
+            assert (kinds == MOVE_SEARCH).any() == (solved_at == "search")
+
+
+def test_kinds_mark_moves_basic_reasoning_cannot_find():
+    """A move is MOVE_BASIC exactly when basic reasoning alone finds it on the board before it."""
+    p, s = encode(HARD_PUZZLE), encode(HARD_SOLUTION)
+    moves, kinds = make_moves(p, s, np.random.default_rng(0))
+    for t, ((cell, digit), kind) in enumerate(zip(moves.tolist(), kinds.tolist())):
+        board = _Board(apply_moves(p, moves, t))
+        while not board.singles() and board.eliminate():
+            pass
+        assert bool(board.singles()) == (kind == MOVE_BASIC), f"step {t}"
+    assert 0 < (kinds != MOVE_BASIC).sum() < 10
+
+
+def test_trial_eliminations_are_sound(monkeypatch):
+    """Every contradiction a trial finds is real: exhaustive search finds no solution either."""
+    found = []
+    original = moves_module._leads_to_contradiction
+
+    def checked(board):
+        start = board.values.copy()
+        result = original(board)
+        if result:
+            found.append(start)
+        return result
+
+    monkeypatch.setattr(moves_module, "_leads_to_contradiction", checked)
+    for puzzle, solution in ((TRIAL_PUZZLE, TRIAL_SOLUTION), (HARD_PUZZLE, HARD_SOLUTION)):
+        make_moves(encode(puzzle), encode(solution), np.random.default_rng(0))
+    assert len(found) > 10
+    assert all(count_solutions(board, limit=1) == 0 for board in found)
+
+
+def test_contradiction():
+    assert not _Board(encode(PUZZLE)).contradiction()
+    s = encode(SOLUTION)
+    # A blank cell with no candidates: row 0 lacks only 6, but column 2 already has a 6.
+    stuck = s.copy()
+    stuck[2], stuck[3] = 0, 4
+    assert _Board(stuck).contradiction()
+    # Every blank has candidates, but column 6 has nowhere left for its 4.
+    hidden = s.copy()
+    hidden[[4, 15, 27, 36, 49, 51, 53, 69, 77]] = 0
+    hidden[33] = 8
+    board = _Board(hidden)
+    assert all(board.cands[c] for c in range(81) if hidden[c] == 0)
+    assert board.contradiction()
+
+
 def test_main_hard_only_keeps_unique_hard_puzzles(tmp_path):
     csv = tmp_path / "puzzles.csv"
-    csv.write_text(
-        "puzzle,solution\n"
-        f"{PUZZLE},{SOLUTION}\n"
-        f"{AMBIGUOUS_PUZZLE},{AMBIGUOUS_SOLUTION}\n"
-        f"{HARD_PUZZLE},{HARD_SOLUTION}\n"
-        f"{HARD_PUZZLE},{HARD_SOLUTION}\n"
-    )
+    write_csv(csv, [(PUZZLE, SOLUTION), (AMBIGUOUS_PUZZLE, AMBIGUOUS_SOLUTION), (TRIAL_PUZZLE, TRIAL_SOLUTION),
+                    (TRIPLE_PUZZLE, TRIPLE_SOLUTION)])
     out = tmp_path / "hard.parquet"
     main(["--input", str(csv), "--output", str(out), "--source", "hard", "--hard-only", "--count", "1"])
     records = read_records(out)
     assert len(records) == 1  # easy and ambiguous skipped, stopped at --count
-    assert np.array_equal(records[0][0], encode(HARD_PUZZLE))
+    assert np.array_equal(records[0][0], encode(TRIAL_PUZZLE))
+
+
+def test_main_exclude_skips_puzzles_in_other_files(tmp_path):
+    csv = tmp_path / "puzzles.csv"
+    write_csv(csv, [(PUZZLE, SOLUTION), (TRIAL_PUZZLE, TRIAL_SOLUTION)])
+    test_set = tmp_path / "test.parquet"
+    main(["--input", str(csv), "--output", str(test_set), "--source", "hard", "--hard-only"])
+    out = tmp_path / "train.parquet"
+    main(["--input", str(csv), "--output", str(out), "--source", "public", "--exclude", str(test_set)])
+    assert [r[0].tolist() for r in read_records(out)] == [encode(PUZZLE).tolist()]

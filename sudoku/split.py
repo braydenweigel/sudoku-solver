@@ -14,17 +14,21 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-from .data import read_records, write_records
+from .data import read_kinds, read_records, write_records
+
+
+def split_indices(n, test_count, rng):
+    """Randomly pick `test_count` of `n` indices for testing; returns (train, test), each sorted."""
+    if not 1 <= test_count < n:
+        raise ValueError(f"test_count must be between 1 and {n - 1}")
+    order = rng.permutation(n)
+    return sorted(order[test_count:].tolist()), sorted(order[:test_count].tolist())
 
 
 def split_records(records, test_count, rng):
     """Randomly pick `test_count` records for testing; the rest are for training."""
-    if not 1 <= test_count < len(records):
-        raise ValueError(f"test_count must be between 1 and {len(records) - 1}")
-    order = rng.permutation(len(records))
-    test = set(order[:test_count].tolist())
-    train = [r for i, r in enumerate(records) if i not in test]
-    return train, [records[i] for i in sorted(test)]
+    train, test = split_indices(len(records), test_count, rng)
+    return [records[i] for i in train], [records[i] for i in test]
 
 
 def main(argv=None):
@@ -40,11 +44,14 @@ def main(argv=None):
     source = sources.pop()
 
     path = Path(args.input)
-    train, test = split_records(read_records(path), args.test_count, np.random.default_rng(args.seed))
-    for name, records in (("train", train), ("test", test)):
+    records, kinds = read_records(path), read_kinds(path)
+    train, test = split_indices(len(records), args.test_count, np.random.default_rng(args.seed))
+    for name, indices in (("train", train), ("test", test)):
         out = path.with_name(f"{path.stem}_{name}{path.suffix}")
-        write_records(out, records, source=source)
-        print(f"wrote {len(records)} records to {out}")
+        write_records(
+            out, [records[i] for i in indices], source=source, kinds=kinds and [kinds[i] for i in indices]
+        )
+        print(f"wrote {len(indices)} records to {out}")
 
 
 if __name__ == "__main__":

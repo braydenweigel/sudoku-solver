@@ -43,3 +43,18 @@ def test_main_writes_both_files(tmp_path):
     assert len(read_records(train)) == 3 and len(read_records(test)) == 2
     for path in (train, test):
         assert set(pq.read_table(path).column("source").to_pylist()) == {"manual"}
+
+
+def test_main_carries_move_kinds(tmp_path):
+    from sudoku.data import read_kinds
+
+    src = tmp_path / "public.parquet"
+    records = make_records(5)
+    kinds = [np.full(len(r[2]), i, dtype=np.uint8) % 3 for i, r in enumerate(records)]
+    write_records(src, records, source="public", kinds=kinds)
+    main(["--input", str(src), "--test-count", "2", "--seed", "0"])
+    by_puzzle = {decode(r[0]): k for r, k in zip(records, kinds)}
+    for name in ("train", "test"):
+        path = tmp_path / f"public_{name}.parquet"
+        for (puzzle, _, _), k in zip(read_records(path), read_kinds(path)):
+            assert np.array_equal(k, by_puzzle[decode(puzzle)])

@@ -1,20 +1,31 @@
-"""Make logically ordered move lists for puzzles that only have a solution.
+"""Make ordered move lists for puzzles that only have a solution.
 
 Usage:
     python -m sudoku.moves --input puzzles.csv --output data/public.parquet --source public
 
 The input CSV has a header row and the puzzle and solution as its first two
-columns, as 81-character strings ('0' or '.' for blanks). Rows whose puzzle
-can't be solved with the techniques below are skipped and counted.
+columns, as 81-character strings ('0' or '.' for blanks).
 
-Each move is a naked single (the only digit left for a cell) or a hidden single
-(the only cell left for a digit in a row, column or box), judged on the
-candidates at that point. When there are none, candidates are eliminated with
-locked candidates, naked pairs and triples, and hidden pairs, until a single
-appears. Nothing is guessed, so every move is deducible from the board before it.
+Every move places the correct digit; wrong guesses and dead ends are never
+recorded. Each move is chosen with the simplest reasoning that finds one:
 
-With --hard-only it does the opposite and keeps only the puzzles those
-techniques can't finish, for a harder test set (see `guided_moves`):
+1. basic: a naked single (the only digit left for a cell) or a hidden single
+   (the only cell left for a digit in a row, column or box). When there are
+   none, candidates are eliminated with locked candidates, naked pairs and
+   triples, and hidden pairs, until a single appears.
+2. trial: if that runs out, try each candidate of a cell (fewest candidates
+   first) and follow its consequences with the basic reasoning. A candidate that
+   leads to a contradiction is ruled out, and step 1 resumes.
+3. search: if no trial gives a contradiction, place the solution's digit in
+   the blank cell with the fewest candidates. Because the puzzle has exactly
+   one solution, a full search would rule out every other candidate there.
+
+--level sets the most advanced step allowed; puzzles that need more are
+skipped. With --level search (the default) every puzzle with exactly one
+solution gets a move list; puzzles with several solutions are skipped.
+
+With --hard-only it keeps only the puzzles that basic reasoning can't finish,
+for a harder test set:
     python -m sudoku.moves --input puzzles.csv --output data/hard_test.parquet --source hard --hard-only --count 2000
 """
 
@@ -24,22 +35,30 @@ from itertools import combinations, islice
 
 import numpy as np
 
-from .data import encode, write_records
+from .data import MOVE_BASIC, MOVE_SEARCH, MOVE_TRIAL, decode, encode, read_records, write_records
 
 ROWS = [list(range(r * 9, r * 9 + 9)) for r in range(9)]
 COLS = [list(range(c, 81, 9)) for c in range(9)]
 BOXES = [[(br + i) * 9 + bc + j for i in range(3) for j in range(3)] for br in (0, 3, 6) for bc in (0, 3, 6)]
 UNITS = ROWS + COLS + BOXES
 PEERS = [set().union(*(u for u in UNITS if c in u)) - {c} for c in range(81)]
+LEVELS = ("basic", "trial", "search")
+_DIGITS = set(range(1, 10))
 
 
 class _Board:
     def __init__(self, puzzle):
         self.values = [int(v) for v in puzzle]
-        self.cands = [set() if v else set(range(1, 10)) for v in self.values]
+        self.cands = [set() if v else set(_DIGITS) for v in self.values]
         for c, v in enumerate(self.values):
             if v:
                 self._remove_from_peers(c, v)
+
+    def copy(self):
+        other = _Board.__new__(_Board)
+        other.values = self.values.copy()
+        other.cands = [set(cs) for cs in self.cands]
+        return other
 
     def _remove_from_peers(self, cell, digit):
         for p in PEERS[cell]:
@@ -61,6 +80,18 @@ class _Board:
                 if len(cells) == 1:
                     found.add((cells[0], d))
         return sorted(found)
+
+    def contradiction(self):
+        """True if the board can't be completed: a blank cell has no candidates,
+        or a row, column or box has nowhere left for one of its missing digits."""
+        if any(v == 0 and not cs for v, cs in zip(self.values, self.cands)):
+            return True
+        for unit in UNITS:
+            placed = {self.values[c] for c in unit} - {0}
+            possible = set().union(*(self.cands[c] for c in unit))
+            if not _DIGITS - placed <= possible:
+                return True
+        return False
 
     def remove(self, cells, digits):
         changed = False
@@ -117,49 +148,94 @@ class _Board:
         return False
 
 
-def _solve(puzzle, solution, rng, guess):
-    board = _Board(puzzle)
-    moves, guesses = [], 0
-    while 0 in board.values:
+def _leads_to_contradiction(board):
+    """Follow basic reasoning from `board` (modified in place) until it is
+    solved, stuck, or contradicts itself. True only for a contradiction."""
+    while True:
+        if board.contradiction():
+            return True
+        if 0 not in board.values:
+            return False
         singles = board.singles()
+        if singles:
+            for cell, digit in singles:
+                if board.values[cell] == digit:
+                    continue
+                if board.values[cell] or digit not in board.cands[cell]:
+                    return True  # two singles clash
+                board.place(cell, digit)
+        elif not board.eliminate():
+            return False
+
+
+def _trial_elimination(board, solution):
+    """Rule out one candidate whose consequences contradict themselves. False if none does."""
+    blanks = sorted((c for c in range(81) if board.values[c] == 0), key=lambda c: (len(board.cands[c]), c))
+    for cell in blanks:
+        # The solution's digit never leads to a contradiction, so trying it would
+        # only waste time; skipping it doesn't change what this finds.
+        for digit in sorted(board.cands[cell] - {int(solution[cell])}):
+            trial = board.copy()
+            trial.place(cell, digit)
+            if _leads_to_contradiction(trial):
+                board.cands[cell].discard(digit)
+                return True
+    return False
+
+
+def make_moves(puzzle, solution, rng=None, level="search"):
+    """Ordered (cell, digit) moves solving `puzzle`, and how each move was found.
+
+    Returns (moves, kinds): moves is uint8[N, 2], or None if reasoning up to
+    `level` runs out; kinds is uint8[N] with MOVE_BASIC for moves found by basic
+    reasoning alone, MOVE_TRIAL for moves found only after at least one trial
+    elimination since the previous move, and MOVE_SEARCH for placements
+    justified by search. Among the singles available at a step, one is chosen
+    at random with `rng` (or the lowest cell if None). Raises ValueError if a
+    deduced digit disagrees with `solution`.
+
+    The search step relies on the puzzle having exactly one solution; check
+    with `count_solutions` before trusting its moves.
+    """
+    if level not in LEVELS:
+        raise ValueError(f"level must be one of {LEVELS}")
+    values = [int(v) for v in puzzle]
+    moves, kinds = [], []
+    while 0 in values:
+        # Start each move from the digits alone, not candidates ruled out for
+        # earlier moves: the model only sees the board, so a move's kind should
+        # say what reasoning the board itself needs.
+        board = _Board(values)
+        kind = MOVE_BASIC
+        singles = board.singles()
+        while not singles:
+            if board.eliminate():
+                pass
+            elif level != "basic" and _trial_elimination(board, solution):
+                kind = MOVE_TRIAL
+            else:
+                break
+            singles = board.singles()
         if singles:
             cell, digit = singles[int(rng.integers(len(singles)))] if rng is not None else singles[0]
             if digit != solution[cell]:
                 raise ValueError(f"deduced {digit} at cell {cell}, but the solution has {solution[cell]}")
-        elif board.eliminate():
-            continue
-        elif guess:
-            blanks = [c for c in range(81) if board.values[c] == 0]
+        elif level == "search":
+            blanks = [c for c in range(81) if values[c] == 0]
             cell = min(blanks, key=lambda c: len(board.cands[c]))
             digit = int(solution[cell])
-            guesses += 1
+            kind = MOVE_SEARCH
         else:
-            return None, guesses
-        board.place(cell, digit)
+            return None, np.array(kinds, dtype=np.uint8)
+        values[cell] = digit
         moves.append((cell, digit))
-    return np.array(moves, dtype=np.uint8).reshape(-1, 2), guesses
+        kinds.append(kind)
+    return np.array(moves, dtype=np.uint8).reshape(-1, 2), np.array(kinds, dtype=np.uint8)
 
 
-def logical_moves(puzzle, solution, rng=None):
-    """Ordered (cell, digit) moves solving `puzzle`, or None if the techniques run out.
-
-    Among the singles available at each step, one is chosen at random with `rng`
-    (or the lowest cell if `rng` is None). Raises ValueError if a deduced digit
-    disagrees with `solution`, which means the solution is wrong.
-    """
-    return _solve(puzzle, solution, rng, guess=False)[0]
-
-
-def guided_moves(puzzle, solution, rng=None):
-    """Like `logical_moves`, but never gives up; returns (moves, guesses).
-
-    When the techniques run out, it places the solution's digit in the blank cell
-    with the fewest candidates (a guided guess) and carries on. The guess count
-    is a rough measure of how far a puzzle is beyond these techniques. Moves
-    after a guess aren't deducible from the board alone, so these move lists
-    suit evaluation, not training with random intermediate boards.
-    """
-    return _solve(puzzle, solution, rng, guess=True)
+def logical_moves(puzzle, solution, rng=None, level="basic"):
+    """Just the moves from `make_moves`, or None if reasoning up to `level` runs out."""
+    return make_moves(puzzle, solution, rng, level)[0]
 
 
 def count_solutions(puzzle, limit=2):
@@ -207,19 +283,23 @@ def main(argv=None):
     parser.add_argument("--input", required=True, help="CSV with puzzle and solution as its first two columns")
     parser.add_argument("--output", required=True)
     parser.add_argument("--source", required=True, help="label for the source column, e.g. the dataset's name")
-    parser.add_argument("--limit", type=int, default=None, help="read only the first N rows")
+    parser.add_argument("--level", choices=LEVELS, default="search", help="most advanced step allowed")
     parser.add_argument(
-        "--hard-only",
-        action="store_true",
-        help="keep only puzzles beyond these techniques that have exactly one solution, "
-        "with guided guesses in their moves; for test sets",
+        "--hard-only", action="store_true", help="keep only puzzles that basic reasoning can't finish"
     )
+    parser.add_argument(
+        "--exclude", nargs="+", default=[], help="record files whose puzzles to skip, e.g. test sets"
+    )
+    parser.add_argument("--limit", type=int, default=None, help="read only the first N rows")
     parser.add_argument("--count", type=int, default=None, help="stop after writing N records")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
 
+    excluded = {decode(p) for path in args.exclude for p, _, _ in read_records(path)}
     rng = np.random.default_rng(args.seed)
-    records, skipped, guesses = [], 0, []
+    records, all_kinds = [], []
+    skipped = {"excluded": 0, "too hard for --level": 0, "several solutions": 0, "not hard": 0}
+    used = {"trial": 0, "search": 0}
     with open(args.input, newline="") as f:
         rows = csv.reader(f)
         next(rows)  # header
@@ -227,23 +307,27 @@ def main(argv=None):
             if args.count is not None and len(records) >= args.count:
                 break
             puzzle, solution = encode(p.strip()), encode(s.strip())
-            moves = logical_moves(puzzle, solution, rng)
-            if args.hard_only:
-                if moves is not None or count_solutions(puzzle) != 1:
-                    skipped += 1
-                    continue
-                moves, n = guided_moves(puzzle, solution, rng)
-                guesses.append(n)
+            if decode(puzzle) in excluded:
+                skipped["excluded"] += 1
+                continue
+            moves, kinds = make_moves(puzzle, solution, rng, args.level)
+            trial, search = (kinds == MOVE_TRIAL).any(), (kinds == MOVE_SEARCH).any()
             if moves is None:
-                skipped += 1
+                skipped["too hard for --level"] += 1
+            elif search and count_solutions(puzzle) != 1:
+                skipped["several solutions"] += 1
+            elif args.hard_only and not (trial or search):
+                skipped["not hard"] += 1
             else:
                 records.append((puzzle, solution, moves))
-    write_records(args.output, records, source=args.source)
-    reason = "were easy enough or had several solutions" if args.hard_only else "needed harder techniques"
-    print(f"wrote {len(records)} records to {args.output}; skipped {skipped} that {reason}")
-    if guesses:
-        g = sorted(guesses)
-        print(f"guided guesses per puzzle: median {g[len(g) // 2]}, range {g[0]}-{g[-1]}")
+                all_kinds.append(kinds)
+                used["trial"] += bool(trial)
+                used["search"] += bool(search)
+    write_records(args.output, records, source=args.source, kinds=all_kinds)
+    print(f"wrote {len(records)} records to {args.output}")
+    print(f"  needed trial eliminations: {used['trial']}, needed search placements: {used['search']}")
+    reasons = ", ".join(f"{n} {why}" for why, n in skipped.items() if n)
+    print(f"  skipped: {reasons or 'none'}")
 
 
 if __name__ == "__main__":

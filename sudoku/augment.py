@@ -16,7 +16,7 @@ import argparse
 
 import numpy as np
 
-from .data import apply_symmetry, decode, read_records, validate_record, write_records
+from .data import apply_symmetry, decode, read_kinds, read_records, validate_record, write_records
 
 _IDENTITY_CELLS = np.arange(81)
 _IDENTITY_DIGITS = np.arange(10, dtype=np.uint8)
@@ -112,26 +112,33 @@ def augment_record(record, rng, min_ops=100, max_ops=150, operations=None):
     return record
 
 
+def generate_with_bases(records, count, rng, min_ops=100, max_ops=150, operations=None, max_attempts=None):
+    """Like `generate`, but also returns the index of each new record's base record."""
+    seen = {decode(puzzle) for puzzle, _, _ in records}
+    out, bases = [], []
+    max_attempts = max_attempts or count * 20
+    for attempt in range(max_attempts):
+        if len(out) == count:
+            break
+        base = attempt % len(records)
+        new = augment_record(records[base], rng, min_ops, max_ops, operations)
+        key = decode(new[0])
+        if key not in seen:
+            seen.add(key)
+            out.append(new)
+            bases.append(base)
+    if len(out) < count:
+        raise RuntimeError(f"only {len(out)} distinct records after {max_attempts} attempts")
+    return out, bases
+
+
 def generate(records, count, rng, min_ops=100, max_ops=150, operations=None, max_attempts=None):
     """Make `count` new records, cycling through `records` as bases.
 
     Records whose puzzle matches an input or an earlier output are skipped, so
     every generated puzzle is distinct.
     """
-    seen = {decode(puzzle) for puzzle, _, _ in records}
-    out = []
-    max_attempts = max_attempts or count * 20
-    for attempt in range(max_attempts):
-        if len(out) == count:
-            break
-        new = augment_record(records[attempt % len(records)], rng, min_ops, max_ops, operations)
-        key = decode(new[0])
-        if key not in seen:
-            seen.add(key)
-            out.append(new)
-    if len(out) < count:
-        raise RuntimeError(f"only {len(out)} distinct records after {max_attempts} attempts")
-    return out
+    return generate_with_bases(records, count, rng, min_ops, max_ops, operations, max_attempts)[0]
 
 
 def main(argv=None):
@@ -146,8 +153,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     records = read_records(args.input)
-    out = generate(records, args.count, np.random.default_rng(args.seed), args.min_ops, args.max_ops)
-    write_records(args.output, out, source=args.source)
+    out, bases = generate_with_bases(records, args.count, np.random.default_rng(args.seed), args.min_ops, args.max_ops)
+    # Operations keep the move order, so each record's move kinds are its base's.
+    kinds = read_kinds(args.input)
+    write_records(args.output, out, source=args.source, kinds=kinds and [kinds[b] for b in bases])
     print(f"wrote {len(out)} records from {len(records)} bases to {args.output}")
 
 

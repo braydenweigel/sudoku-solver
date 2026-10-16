@@ -84,6 +84,13 @@ def main(argv=None):
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--augment", action="store_true", help="also apply random symmetries while training")
+    parser.add_argument(
+        "--hard-fraction",
+        type=float,
+        default=0.0,
+        help="chance of training on the board just before a move that needed more than basic reasoning, "
+        "for puzzles that have one (needs move kinds in the training file)",
+    )
     parser.add_argument("--limit", type=int, default=None, help="use only the first N training records")
     parser.add_argument("--workers", type=int, default=0, help="DataLoader worker processes")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -93,7 +100,7 @@ def main(argv=None):
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
-    train_set = SudokuDataset(args.train, random_step=True, augment=args.augment)
+    train_set = SudokuDataset(args.train, random_step=True, augment=args.augment, hard_fraction=args.hard_fraction)
     if args.limit:
         train_set = Subset(train_set, range(min(args.limit, len(train_set))))
     test_set = SudokuDataset(args.test)

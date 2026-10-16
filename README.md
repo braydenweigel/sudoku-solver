@@ -11,6 +11,7 @@ Training data is stored as one record per puzzle, in one Parquet file per split 
 | `solution` | string, 81 chars | Solved grid |
 | `moves` | list of `[cell, digit]` pairs (`uint8`) | Every placement in the order it was made; `cell` is 0–80 (row × 9 + column), `digit` is 1–9 |
 | `source` | string | How the record was produced, e.g. `manual` for puzzles solved by hand |
+| `kinds` (optional) | list of `uint8` | One per move: how the board before it can be solved. `0` basic reasoning, `1` needs a trial, `2` needs search. Written by `sudoku.moves`, and kept by `sudoku.split` and `sudoku.augment` |
 
 Intermediate boards are not stored. The board after step *t* is `puzzle` with the first *t* moves applied.
 
@@ -35,6 +36,7 @@ Options for training:
 
 - `random_step=True` replays a random number of moves on each access, so the model sees a different partly solved board each epoch. Leave it off for evaluation to get the original puzzle.
 - `augment=True` applies a random transform that keeps the puzzle valid: digit relabelling, row and column swaps within a band, band swaps, and transpose.
+- `hard_fraction=p` (with `random_step=True`, and a file with `kinds`): for puzzles with any moves that need more than basic reasoning, a chance `p` of using the board just before such a move instead of a uniformly random one. Those few boards decide whether a hard puzzle gets solved, and uniform sampling almost never picks them.
 
 ### Generating records
 
@@ -82,21 +84,34 @@ python -m sudoku.augment --input data/manual_test.parquet --output data/generate
 
 ### Move lists for puzzles with only a solution
 
-Public sudoku datasets give a puzzle and its solution but no moves. `sudoku.moves` produces a logically ordered move list for each one: at every step it places a naked or hidden single, and when there is none it eliminates candidates with locked candidates, naked pairs and triples, or hidden pairs until a single appears. It never guesses, so every move is deducible from the board before it.
+Public sudoku datasets give a puzzle and its solution but no moves. `sudoku.moves` produces a move list for each one. Every move places the correct digit, and wrong guesses and dead ends are never recorded, so the model only ever learns correct next steps. Each move is found with the simplest reasoning that works:
+
+1. **Basic:** a naked or hidden single. When there is none, candidates are eliminated with locked candidates, naked pairs and triples, or hidden pairs until a single appears.
+2. **Trial:** when basic reasoning runs out, it tries each candidate of a cell (fewest candidates first) and follows its consequences with basic reasoning. A candidate that leads to a contradiction is ruled out, and basic reasoning resumes.
+3. **Search:** if no trial finds a contradiction, it places the solution's digit in the blank cell with the fewest candidates. The puzzle has exactly one solution, so a full search would rule out every other candidate there.
 
 ```
-python -m sudoku.moves --input puzzles.csv --output data/public.parquet --source public
+python -m sudoku.moves --input puzzles.csv --output data/public.parquet --source public --exclude data/hard_test.parquet
 ```
 
-The input is a CSV with a header row and the puzzle and solution as its first two columns (81 characters each, `0` or `.` for blanks), as in the common Kaggle sudoku datasets. Puzzles that need harder techniques, or that have more than one solution, are skipped and counted. It takes about 10 ms per puzzle, so 100,000 puzzles take around 20 minutes; `--limit N` uses only the first N rows. The output is an ordinary record file, ready for `sudoku.split`.
+The input is a CSV with a header row and the puzzle and solution as its first two columns (81 characters each, `0` or `.` for blanks), as in the common Kaggle sudoku datasets. Every puzzle with exactly one solution gets a move list; puzzles with several solutions are skipped. It reports how many puzzles needed trial or search steps, and records how each move was found in the `kinds` column. A move's kind describes the board before it, judged from its digits alone, so it matches what the model sees.
 
-**Harder test puzzles.** `--hard-only` keeps only the puzzles those techniques can't finish, and that have exactly one solution, so it makes a test set harder than anything in the training data:
+| Option | Meaning |
+|---|---|
+| `--level basic`, `trial` or `search` | The most advanced step allowed (default `search`). Puzzles that need more are skipped. `basic` reproduces the original behaviour of skipping hard puzzles. |
+| `--exclude FILE ...` | Skip puzzles found in these record files. Use it so test puzzles never end up in training data. |
+| `--limit N` | Read only the first N rows. |
+| `--count N` | Stop after writing N records. |
+
+It averages about 9 ms per puzzle, so 100,000 puzzles take about 15 minutes. Rare, extremely hard puzzles can take a few seconds each, because each trial follows a candidate's consequences in full.
+
+**Harder test puzzles.** `--hard-only` keeps only puzzles that basic reasoning can't finish, which makes a test set harder than the typical training puzzle:
 
 ```
 python -m sudoku.moves --input puzzles.csv --output data/hard_test.parquet --source hard --hard-only --count 2000
 ```
 
-When the techniques run out, it places the solution's digit in the blank cell with the fewest candidates (a guided guess) and carries on, and it prints how many guesses the puzzles needed. Moves after a guess can't be deduced from the board alone, so use these files for evaluation only, not for training. None of these puzzles can be in a training file made by `sudoku.moves` without `--hard-only`, since that skips them.
+Make the hard test set first, then pass it to `--exclude` when generating training data from the same CSV, or its puzzles will also be in the training set.
 
 ## Training
 
@@ -116,6 +131,7 @@ Useful options:
 - `--d-model`, `--layers`, `--heads`, `--dropout` set the model size (defaults 128, 6, 4, 0.1).
 - `--batch-size`, `--lr`, `--weight-decay` set the optimiser (defaults 256, 3e-4, 0.01). The learning rate warms up, then decays to zero by the last epoch.
 - `--augment` also applies random symmetries to each training example as it is loaded.
+- `--hard-fraction P` trains on the decisive boards of hard puzzles more often (see `hard_fraction` above). It needs a training file with move kinds, made from `sudoku.moves` output. Try 0.5.
 
 ### Comparing solving methods
 

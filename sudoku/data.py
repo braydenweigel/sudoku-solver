@@ -90,27 +90,44 @@ def apply_symmetry(puzzle, solution, moves, perm, digit_map):
     return digit_map[puzzle[perm]], digit_map[solution[perm]], new_moves
 
 
-def write_records(path, records, source: str) -> None:
+MOVE_BASIC, MOVE_TRIAL, MOVE_SEARCH = 0, 1, 2  # values of the optional "kinds" column
+
+
+def write_records(path, records, source: str, kinds=None) -> None:
     """Write an iterable of (puzzle, solution, moves) records to a Parquet file.
 
     `source` labels how the records were produced (e.g. "manual") and is stored
-    in a column of the same name.
+    in a column of the same name. `kinds`, if given, holds one uint8 array per
+    record saying how each move was found (MOVE_BASIC, MOVE_TRIAL or
+    MOVE_SEARCH), and is stored in a "kinds" column.
     """
+    records = list(records)
+    if kinds is not None and len(kinds) != len(records):
+        raise ValueError("kinds must have one entry per record")
     puzzles, solutions, moves_col = [], [], []
-    for puzzle, solution, moves in records:
+    for i, (puzzle, solution, moves) in enumerate(records):
         validate_record(puzzle, solution, moves)
+        if kinds is not None and len(kinds[i]) != len(moves):
+            raise ValueError("kinds must have one entry per move")
         puzzles.append(decode(puzzle))
         solutions.append(decode(solution))
         moves_col.append(moves.tolist())
-    table = pa.table(
-        {
-            "puzzle": pa.array(puzzles, pa.string()),
-            "solution": pa.array(solutions, pa.string()),
-            "moves": pa.array(moves_col, pa.list_(pa.list_(pa.uint8(), 2))),
-            "source": pa.array([source] * len(puzzles), pa.string()),
-        }
-    )
-    pq.write_table(table, path)
+    columns = {
+        "puzzle": pa.array(puzzles, pa.string()),
+        "solution": pa.array(solutions, pa.string()),
+        "moves": pa.array(moves_col, pa.list_(pa.list_(pa.uint8(), 2))),
+        "source": pa.array([source] * len(puzzles), pa.string()),
+    }
+    if kinds is not None:
+        columns["kinds"] = pa.array([np.asarray(k).tolist() for k in kinds], pa.list_(pa.uint8()))
+    pq.write_table(pa.table(columns), path)
+
+
+def read_kinds(path):
+    """Per-move kinds from a file written with `kinds`, or None if it has none."""
+    if "kinds" not in pq.read_schema(path).names:
+        return None
+    return [np.array(k, dtype=np.uint8) for k in pq.read_table(path, columns=["kinds"]).column("kinds").to_pylist()]
 
 
 def read_records(path) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:

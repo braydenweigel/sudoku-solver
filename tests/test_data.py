@@ -150,3 +150,40 @@ def test_dataset_one_hot(split):
     assert board.shape == (10, 9, 9) and board.dtype == torch.float32
     assert torch.equal(board.argmax(0).reshape(81), torch.from_numpy(encode(PUZZLE).astype(np.int64)))
     assert torch.equal(board[0].reshape(81).bool(), mask)
+
+
+def test_kinds_round_trip_and_are_optional(tmp_path):
+    from sudoku.data import read_kinds
+
+    record = make_record()
+    kinds = np.zeros(len(record[2]), dtype=np.uint8)
+    kinds[[3, 7]] = 1
+    with_kinds, without = tmp_path / "with.parquet", tmp_path / "without.parquet"
+    write_records(with_kinds, [record], source="test", kinds=[kinds])
+    write_records(without, [record], source="test")
+    assert np.array_equal(read_kinds(with_kinds)[0], kinds)
+    assert read_kinds(without) is None
+    with pytest.raises(ValueError):
+        write_records(tmp_path / "bad.parquet", [record], source="test", kinds=[kinds[:-1]])
+
+
+def test_dataset_hard_fraction_picks_hard_steps(tmp_path):
+    record = make_record()
+    puzzle, solution, moves = record
+    kinds = np.zeros(len(moves), dtype=np.uint8)
+    kinds[20] = 1  # the board just before move 20 is the decisive one
+    path = tmp_path / "train.parquet"
+    write_records(path, [record], source="test", kinds=[kinds])
+    expected = torch.from_numpy(apply_moves(puzzle, moves, 20).astype(np.int64))
+
+    always = SudokuDataset(path, random_step=True, hard_fraction=1.0)
+    assert all(torch.equal(always[0][0], expected) for _ in range(20))
+
+    half = SudokuDataset(path, random_step=True, hard_fraction=0.5)
+    hits = sum(torch.equal(half[0][0], expected) for _ in range(400))
+    assert 150 < hits < 260  # about half, plus the odd uniform pick of step 20
+
+    plain = tmp_path / "plain.parquet"
+    write_records(plain, [record], source="test")
+    with pytest.raises(ValueError):  # no move kinds to sample from
+        SudokuDataset(plain, random_step=True, hard_fraction=0.5)

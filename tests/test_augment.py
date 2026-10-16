@@ -166,3 +166,15 @@ def test_main_writes_file(tmp_path):
     main(["--input", str(src), "--output", str(dst), "--count", "5", "--seed", "0"])
     assert len(read_records(dst)) == 5
     assert pq.read_table(dst).column("source").to_pylist() == ["generated"] * 5
+
+
+def test_main_carries_move_kinds(tmp_path):
+    from sudoku.data import read_kinds
+
+    src, dst = tmp_path / "base.parquet", tmp_path / "generated.parquet"
+    base = make_record()
+    kinds = np.zeros(len(base[2]), dtype=np.uint8)
+    kinds[5] = 1
+    write_records(src, [base], source="public", kinds=[kinds])
+    main(["--input", str(src), "--output", str(dst), "--count", "3", "--seed", "0", "--min-ops", "5", "--max-ops", "10"])
+    assert all(np.array_equal(k, kinds) for k in read_kinds(dst))
