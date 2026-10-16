@@ -46,7 +46,7 @@ To generate records, run this from the repository root, with the dependencies in
 python -m sudoku.augment --count 100000 --seed 0
 ```
 
-This reads `data/manual.parquet` and writes `data/generated.parquet`, overwriting it if it exists. Generating 100,000 records takes under a minute.
+This reads `data/manual.parquet` and writes `data/generated.parquet`, overwriting it if it exists. Generating 100,000 records takes about two minutes.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -80,9 +80,35 @@ python -m sudoku.augment --input data/manual_test.parquet --output data/generate
 
 **Adding an operation.** Write a function that takes a NumPy random generator and returns a cell permutation and a digit relabelling, then add it to `OPERATIONS` in `sudoku/augment.py`. The tests check every operation in that list automatically.
 
-### Tests
+## Training
+
+`sudoku.train` trains `sudoku.model.SudokuTransformer`, which reads a board and predicts a digit for all 81 cells at once. After generating `data/generated_train.parquet` and `data/generated_test.parquet` (see above):
+
+```
+python -m sudoku.train --epochs 10
+```
+
+Each epoch prints the training loss and, on the test file's original puzzles, the loss, the share of blank cells predicted correctly (`cell acc`) and the share of puzzles with every cell right (`puzzle acc`). Only blank cells count towards the loss and accuracy. The model with the lowest test loss is saved to `checkpoints/model.pt`, which git ignores; load it with `sudoku.train.load_model`.
+
+It uses the GPU when PyTorch can see one (see [Tests](#tests) for installing the GPU build), with bfloat16 mixed precision. On an RTX 5070 an epoch of 80,000 records takes about 7 seconds.
+
+Useful options:
+
+- `--limit N` trains on the first N records only, for quick runs. The test file is still used in full.
+- `--d-model`, `--layers`, `--heads`, `--dropout` set the model size (defaults 128, 6, 4, 0.1).
+- `--batch-size`, `--lr`, `--weight-decay` set the optimiser (defaults 256, 3e-4, 0.01). The learning rate warms up, then decays to zero by the last epoch.
+- `--augment` also applies random symmetries to each training example as it is loaded.
+
+## Tests
 
 ```
 pip install -r requirements.txt
 python -m pytest
+```
+
+`pip install -r requirements.txt` installs the CPU-only build of PyTorch. To train on an NVIDIA GPU, replace it with a CUDA build afterwards (CUDA 13.0 here, which supports RTX 50-series cards):
+
+```
+pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu130
+python -c "import torch; print(torch.cuda.is_available())"
 ```
