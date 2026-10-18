@@ -15,10 +15,56 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from .dataset import SudokuDataset
+from .moves import UNITS
 from .solve import fill_all, fill_one_at_a_time
-from .train import load_model
+from .train import autocast, load_model
 
-METHODS = {"all at once": fill_all, "one cell at a time": fill_one_at_a_time}
+# _UNIT_CELLS[u, c] is 1 if cell c belongs to unit u (a row, column or box).
+_UNIT_CELLS = torch.zeros(27, 81)
+for _u, _cells in enumerate(UNITS):
+    _UNIT_CELLS[_u, _cells] = 1
+
+
+def conflicts(board):
+    """bool[B, 81]: True where a filled cell's digit is repeated in its row, column or box."""
+    unit_cells = _UNIT_CELLS.to(board.device)
+    digits = torch.nn.functional.one_hot(board, 10)[..., 1:].float()  # [B, 81, 9]
+    counts = torch.einsum("uc,bcd->bud", unit_cells, digits)  # [B, 27, 9]
+    repeated = torch.einsum("uc,bud->bcd", unit_cells, (counts > 1).float()) > 0  # [B, 81, 9]
+    return (repeated & (digits > 0)).any(-1)
+
+
+@torch.no_grad()
+def fill_all_with_retries(model, board, tries=5, keep_above=0.9):
+    """Solve all at once, and try again if the result breaks the rules.
+
+    A filled grid with no repeated digit in any row, column or box is a valid
+    solution, and for a puzzle with exactly one solution it is the right one, so
+    this never needs the answer. When a grid isn't valid, the next try starts
+    from the puzzle plus every predicted digit that the model was at least
+    `keep_above` sure of and that isn't part of a repeat, and solves all at once
+    again from that fuller board. Stops after `tries` runs, returning the last
+    attempt for puzzles that never became valid.
+    """
+    current, result, retry = board, None, None
+    for attempt in range(tries):
+        with autocast(board.device):
+            confidence, digit = model(current).float().softmax(-1).max(-1)
+        filled = torch.where(current > 0, current, digit + 1)
+        result = filled if result is None else torch.where(retry[:, None], filled, result)
+        bad = conflicts(result)
+        retry = bad.any(1)
+        if not retry.any() or attempt == tries - 1:
+            return result
+        keep = (board == 0) & ~bad & (confidence >= keep_above)
+        current = torch.where(keep, result, board)
+
+
+METHODS = {
+    "all at once": fill_all,
+    "all at once, retries": fill_all_with_retries,
+    "one cell at a time": fill_one_at_a_time,
+}
 
 
 def score(method, model, loader, device):

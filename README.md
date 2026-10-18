@@ -139,6 +139,7 @@ Useful options:
 `sudoku.evaluate` runs a trained model on the original puzzles in one or more files and reports cell and puzzle accuracy for each way of filling the board (`sudoku/solve.py`):
 
 - **all at once**: one run of the model fills every blank cell.
+- **all at once, retries**: the same, but if the filled grid repeats a digit in any row, column or box, it tries again from the puzzle plus the predicted digits it was at least 90% sure of that aren't part of a repeat, up to 5 runs. A grid with no repeats is the solution of a puzzle with exactly one, so this never needs the answer.
 - **one cell at a time**: fill only the blank cell the model is most confident about, then run it again on the updated board, until the grid is full.
 
 ```
