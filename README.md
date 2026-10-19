@@ -148,6 +148,41 @@ python -m sudoku.evaluate --data data/generated_test.parquet data/generated_trai
 
 It uses the first 2,000 puzzles of each file by default (`--limit`).
 
+## Using the model
+
+`sudoku.api` wraps a trained checkpoint for use from other code:
+
+```python
+from sudoku.api import SudokuSolver, SolveError
+
+solver = SudokuSolver.from_checkpoint("checkpoints/model.pt")
+
+solver.solve("530070000600195000098000060800060003400803001700020006060000280000419005000080079")
+# -> "534678912672195348198342567859761423426853791713924856961537284287419635345286179"
+
+solver.solve([[5, 3, 0, 0, 7, 0, 0, 0, 0], ...])  # 9x9 list in, 9x9 list out
+solver.solve_many(puzzles)                        # many at once, much faster than one by one
+solver.next_move(puzzle)                          # Move(row=..., col=..., digit=..., confidence=...), e.g. for hints
+```
+
+| Function | What it does |
+|---|---|
+| `solve(puzzle, method="one_at_a_time")` | Returns the finished grid in the same form as the puzzle. Raises `SolveError` (with the attempt in `.grid`) if the model's grid breaks the rules. |
+| `solve_many(puzzles, method=..., strict=True)` | Solves a list together on the GPU. A puzzle the model gets wrong gives `None` (or its attempt, with `strict=False`). |
+| `next_move(puzzle)` | The single move the model is most sure of, with rows and columns numbered 0–8, or `None` if the puzzle is full. |
+| `parse(puzzle)` | Checks a puzzle and converts it to 81 numbers. Raises `ValueError` if it's malformed or already repeats a digit. |
+| `is_solution(puzzle, grid)` | True if `grid` is filled, keeps every given, and breaks no rules. |
+
+Puzzles can be an 81-character string, with `0` or `.` for blanks (spaces, newlines and `| - +` are ignored, so a printed grid works), or a 9x9 list of ints with 0 for blanks. `method` is `one_at_a_time` (most accurate), `retries` (about 10 times faster, a little less accurate) or `all_at_once` (fastest, least accurate). Every result is checked against the rules, so a wrong answer is never returned as if it were right. A grid that breaks no rules is the solution of any puzzle that has exactly one.
+
+From the command line, this prints the solved grid:
+
+```
+python -m sudoku.api 530070000600195000098000060800060003400803001700020006060000280000419005000080079
+```
+
+To use the model over HTTP instead, see the [REST API](server/README.md), which is in its own folder with its own requirements.
+
 ## Tests
 
 ```
