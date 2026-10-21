@@ -93,3 +93,37 @@ def test_check(client):
     assert client.post("/check", json={"puzzle": PUZZLE, "grid": SOLUTION}).json() == {"valid": True}
     assert client.post("/check", json={"puzzle": PUZZLE, "grid": PUZZLE}).json() == {"valid": False}
     assert client.post("/check", json={"puzzle": PUZZLE, "grid": "123"}).status_code == 400
+
+
+def preflight(client, origin):
+    return client.options(
+        "/solve",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+
+def test_cors_allows_vite_dev_server_by_default(client, monkeypatch):
+    r = preflight(client, "http://localhost:5173")
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    r = client.post("/solve", json={"puzzle": PUZZLE}, headers={"Origin": "http://localhost:5173"})
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_cors_rejects_other_origins(client):
+    r = preflight(client, "http://evil.example")
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_cors_origins_are_configurable(monkeypatch):
+    solver = SudokuSolver(Oracle(SOLUTION), device="cpu")
+    with TestClient(create_app(solver, cors_origins="https://sudoku.example, http://localhost:3000")) as c:
+        assert preflight(c, "https://sudoku.example").headers["access-control-allow-origin"] == "https://sudoku.example"
+        assert "access-control-allow-origin" not in preflight(c, "http://localhost:5173").headers
+    monkeypatch.setenv("SUDOKU_CORS_ORIGINS", "*")
+    with TestClient(create_app(solver)) as c:
+        assert preflight(c, "http://anything.example").headers["access-control-allow-origin"] == "*"

@@ -7,6 +7,10 @@ then open http://localhost:8000/docs for interactive documentation. The model is
 loaded once at startup; set SUDOKU_CHECKPOINT and SUDOKU_DEVICE to choose the
 checkpoint and device when running the app another way, e.g. `uvicorn server.app:app`.
 
+Web pages on other origins may call it if their origin is allowed: by default
+Vite's development server (http://localhost:5173), otherwise the comma-separated
+list in --cors-origins or SUDOKU_CORS_ORIGINS.
+
 Puzzles are an 81-character string ('0' or '.' for blanks) or a 9x9 list of ints
 (0 for blanks), and results come back in the same form. A puzzle the model
 can't solve is not an error: the response has "solved": false and the model's
@@ -20,6 +24,7 @@ from contextlib import asynccontextmanager
 from typing import Literal, Optional, Union
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from sudoku.api import SudokuSolver, is_solution, parse
@@ -27,6 +32,7 @@ from sudoku.api import SudokuSolver, is_solution, parse
 Puzzle = Union[str, list[list[int]]]
 Method = Literal["one_at_a_time", "retries", "all_at_once"]
 MAX_BATCH = 10_000
+DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"  # Vite's development server
 
 _EXAMPLE = "530070000600195000098000060800060003400803001700020006060000280000419005000080079"
 
@@ -88,8 +94,12 @@ def _check_puzzle(puzzle):
         raise HTTPException(status_code=400, detail=str(e)) from None
 
 
-def create_app(solver=None):
-    """Build the app. Without `solver`, one is loaded from SUDOKU_CHECKPOINT at startup."""
+def create_app(solver=None, cors_origins=None):
+    """Build the app. Without `solver`, one is loaded from SUDOKU_CHECKPOINT at startup.
+
+    `cors_origins` is a comma-separated list of web origins whose pages may call
+    the API (default: SUDOKU_CORS_ORIGINS, or Vite's development server).
+    """
     state = {"solver": solver}
     lock = threading.Lock()  # one model call at a time; requests run in a thread pool
 
@@ -105,6 +115,13 @@ def create_app(solver=None):
         title="Sudoku solver",
         description="Solve sudoku puzzles with a trained transformer model.",
         lifespan=lifespan,
+    )
+    origins = cors_origins if cors_origins is not None else os.environ.get("SUDOKU_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in origins.split(",") if o.strip()],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
     )
 
     @app.get("/health")
@@ -163,11 +180,16 @@ def main(argv=None):
     parser.add_argument("--device", default=None, help="cuda or cpu (default: cuda if available)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--cors-origins",
+        default=None,
+        help=f"comma-separated web origins allowed to call the API, or * for any (default: {DEFAULT_CORS_ORIGINS})",
+    )
     args = parser.parse_args(argv)
     os.environ["SUDOKU_CHECKPOINT"] = args.checkpoint
     if args.device:
         os.environ["SUDOKU_DEVICE"] = args.device
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(create_app(cors_origins=args.cors_origins), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
